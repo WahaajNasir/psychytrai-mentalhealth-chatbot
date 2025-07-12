@@ -1,4 +1,3 @@
-// ChatScreen.js
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -24,35 +23,51 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const loadUser = async () => {
+    const loadData = async () => {
       try {
         const userData = await AsyncStorage.getItem('userInfo');
+        const savedMessages = await AsyncStorage.getItem('chatMessages');
+
         if (userData) {
           setUserInfo(JSON.parse(userData));
         } else {
           console.warn('No userInfo found in AsyncStorage');
         }
+
+        if (savedMessages) {
+          setMessages(JSON.parse(savedMessages));
+        }
       } catch (err) {
-        console.error('Failed to load userInfo:', err);
+        console.error('Error loading data from AsyncStorage:', err);
       }
     };
-    loadUser();
+    loadData();
   }, []);
+
+  const saveMessages = async (msgs) => {
+    try {
+      await AsyncStorage.setItem('chatMessages', JSON.stringify(msgs));
+    } catch (err) {
+      console.error('Failed to save messages:', err);
+    }
+  };
 
   const handleSend = async () => {
     const userMessage = message.trim();
     if (!userMessage) return;
 
     if (!userInfo) {
-      console.warn('userInfo is null, blocking send.');
-      setMessages((prev) => [
-        ...prev,
+      console.warn('userInfo is null – blocking send.');
+      const failMsg = [
+        ...messages,
         {
           id: Date.now().toString() + '-bot',
           text: 'User info is missing. Please restart the app or complete onboarding again.',
           sender: 'bot',
         },
-      ]);
+      ];
+      setMessages(failMsg);
+      await saveMessages(failMsg);
       return;
     }
 
@@ -63,27 +78,32 @@ export default function ChatScreen() {
     setMessages(newMessages);
     setMessage('');
     setLoading(true);
+    await saveMessages(newMessages);
 
     try {
       const aiText = await getGeminiResponse(newMessages, userInfo);
-      setMessages((prev) => [
-        ...prev,
+      const updatedMessages = [
+        ...newMessages,
         {
           id: Date.now().toString() + '-bot',
           text: aiText,
           sender: 'bot',
         },
-      ]);
+      ];
+      setMessages(updatedMessages);
+      await saveMessages(updatedMessages);
     } catch (err) {
       console.error('Error getting AI response:', err);
-      setMessages((prev) => [
-        ...prev,
+      const fallback = [
+        ...newMessages,
         {
           id: Date.now().toString() + '-bot',
           text: 'Sorry, something went wrong while contacting Gemini.',
           sender: 'bot',
         },
-      ]);
+      ];
+      setMessages(fallback);
+      await saveMessages(fallback);
     } finally {
       setLoading(false);
     }
@@ -118,7 +138,7 @@ export default function ChatScreen() {
             />
 
             {loading && (
-              <Text style={styles.typingIndicator}>AI is typing…</Text>
+              <Text style={styles.typingIndicator}>AI is typing...</Text>
             )}
 
             <View style={styles.inputContainer}>
