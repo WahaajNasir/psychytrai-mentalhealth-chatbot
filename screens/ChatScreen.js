@@ -1,109 +1,120 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  Keyboard,
-  TouchableWithoutFeedback,
-  ActivityIndicator,
+  View, Text, TextInput, TouchableOpacity, FlatList,
+  StyleSheet, KeyboardAvoidingView, Platform,
+  Keyboard, TouchableWithoutFeedback, ActivityIndicator
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useHeaderHeight } from '@react-navigation/elements';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getGeminiResponse } from '../utils/api.js';
+import { getGeminiResponse } from '../utils/api';
+import {
+  insertMessage,
+  getMessages,
+  getSummary,
+  saveSummary,
+} from '../utils/db';
+import { useTheme } from '../context/ThemeContext';
 
-export default function ChatScreen() {
+export default function ChatScreen({ navigation }) {
+  const { isDark, toggleTheme } = useTheme();
+  const headerHeight = useHeaderHeight();
+  const insets = useSafeAreaInsets();
+  const flatListRef = useRef();
+
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [userInfo, setUserInfo] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [summary, setSummary] = useState([]);
+  const [keyboardPadding, setKeyboardPadding] = useState(0);
 
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const userData = await AsyncStorage.getItem('userInfo');
-        const savedMessages = await AsyncStorage.getItem('chatMessages');
-
-        if (userData) {
-          setUserInfo(JSON.parse(userData));
-        } else {
-          console.warn('No userInfo found in AsyncStorage');
-        }
-
-        if (savedMessages) {
-          setMessages(JSON.parse(savedMessages));
-        }
-      } catch (err) {
-        console.error('Error loading data from AsyncStorage:', err);
-      }
-    };
-    loadData();
-  }, []);
-
-  const saveMessages = async (msgs) => {
-    try {
-      await AsyncStorage.setItem('chatMessages', JSON.stringify(msgs));
-    } catch (err) {
-      console.error('Failed to save messages:', err);
-    }
+  const colors = {
+    background: isDark ? '#121212' : '#FFFFFF',
+    text: isDark ? '#FFFFFF' : '#000000',
+    inputBackground: isDark ? '#1e1e1e' : '#f0f0f0',
+    border: isDark ? '#333333' : '#e0e0e0',
+    bubbleUser: isDark ? '#103bcaff' : '#b6e98cff',
+    bubbleBot: isDark ? '#2A2A2A' : '#E3E3E3',
   };
 
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
+      setKeyboardPadding(50); // Adjust this value to increase/decrease padding
+    });
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardPadding(0);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <TouchableOpacity onPress={toggleTheme} style={{ marginRight: 15 }}>
+          <Text style={{ color: colors.text, fontSize: 20 }}>
+            {isDark ? '☀️' : '🌙'}
+          </Text>
+        </TouchableOpacity>
+      ),
+      headerStyle: {
+        backgroundColor: colors.background,
+      },
+      headerTitleStyle: {
+        color: colors.text,
+      },
+    });
+  }, [navigation, toggleTheme, isDark]);
+
+  useEffect(() => {
+    const init = async () => {
+      const userData = await AsyncStorage.getItem('userInfo');
+      if (userData) setUserInfo(JSON.parse(userData));
+
+      const storedMessages = await getMessages();
+      const storedSummary = await getSummary();
+      setMessages(storedMessages);
+      setSummary(storedSummary);
+    };
+    init();
+  }, []);
+
   const handleSend = async () => {
-    const userMessage = message.trim();
-    if (!userMessage) return;
+    const userText = message.trim();
+    if (!userText || !userInfo) return;
 
-    if (!userInfo) {
-      console.warn('userInfo is null – blocking send.');
-      const failMsg = [
-        ...messages,
-        {
-          id: Date.now().toString() + '-bot',
-          text: 'User info is missing. Please restart the app or complete onboarding again.',
-          sender: 'bot',
-        },
-      ];
-      setMessages(failMsg);
-      await saveMessages(failMsg);
-      return;
-    }
+    const userId = Date.now().toString();
+    const userMsg = { id: userId, text: userText, sender: 'user' };
 
-    const newMessages = [
-      ...messages,
-      { id: Date.now().toString(), text: userMessage, sender: 'user' },
-    ];
-    setMessages(newMessages);
     setMessage('');
     setLoading(true);
-    await saveMessages(newMessages);
+    setMessages(prev => [...prev, userMsg]);
+    await insertMessage(userId, userText, 'user');
 
     try {
-      const aiText = await getGeminiResponse(newMessages, userInfo);
-      const updatedMessages = [
-        ...newMessages,
-        {
-          id: Date.now().toString() + '-bot',
-          text: aiText,
-          sender: 'bot',
-        },
-      ];
-      setMessages(updatedMessages);
-      await saveMessages(updatedMessages);
+      const aiText = await getGeminiResponse(summary, userText, userInfo);
+      const botId = `${Date.now().toString()}-bot`;
+      const botMsg = { id: botId, text: aiText, sender: 'bot' };
+
+      setMessages(prev => [...prev, botMsg]);
+      await insertMessage(botId, aiText, 'bot');
+
+      const newSummary = `${summary}\nUser: ${userText}\nAI: ${aiText}`;
+      const trimmed = newSummary.length > 1500 ? newSummary.slice(-1500) : newSummary;
+      await saveSummary(trimmed);
+      setSummary(trimmed);
     } catch (err) {
-      console.error('Error getting AI response:', err);
-      const fallback = [
-        ...newMessages,
-        {
-          id: Date.now().toString() + '-bot',
-          text: 'Sorry, something went wrong while contacting Gemini.',
-          sender: 'bot',
-        },
-      ];
-      setMessages(fallback);
-      await saveMessages(fallback);
+      const errorMsg = {
+        id: Date.now().toString() + '-err',
+        sender: 'bot',
+        text: 'Sorry, something went wrong.',
+      };
+      setMessages(prev => [...prev, errorMsg]);
+      await insertMessage(errorMsg.id, errorMsg.text, 'bot');
     } finally {
       setLoading(false);
     }
@@ -113,40 +124,73 @@ export default function ChatScreen() {
     <View
       style={[
         styles.messageBubble,
-        item.sender === 'user' ? styles.userBubble : styles.botBubble,
+        {
+          alignSelf: item.sender === 'user' ? 'flex-end' : 'flex-start',
+          backgroundColor: item.sender === 'user' ? colors.bubbleUser : colors.bubbleBot,
+        },
       ]}
     >
-      <Text style={styles.messageText}>{item.text}</Text>
+      <Text style={{ color: colors.text }}>{item.text}</Text>
     </View>
   );
 
   return (
-    <SafeAreaView style={{ flex: 1 }} edges={['bottom']}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]} edges={['bottom']}>
       <KeyboardAvoidingView
-        style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={90}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight + insets.top : 0}
+        style={{ flex: 1 }}
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <View style={styles.container}>
+          <View style={{ flex: 1 }}>
             <FlatList
+              ref={flatListRef}
               data={messages}
               keyExtractor={(item) => item.id}
               renderItem={renderMessage}
-              contentContainerStyle={styles.messagesList}
+              contentContainerStyle={[
+                styles.messagesList,
+                { 
+                  paddingBottom: (Platform.OS === 'ios' ? 80 : 70) + keyboardPadding 
+                }
+              ]}
+              onContentSizeChange={() =>
+                flatListRef.current?.scrollToEnd({ animated: true })
+              }
+              onLayout={() =>
+                flatListRef.current?.scrollToEnd({ animated: true })
+              }
+              keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             />
 
             {loading && (
-              <Text style={styles.typingIndicator}>AI is typing...</Text>
+              <Text style={[styles.typingIndicator, { color: colors.text }]}>
+                AI is typing…
+              </Text>
             )}
 
-            <View style={styles.inputContainer}>
+            <View style={[
+              styles.inputContainer,
+              {
+                backgroundColor: colors.background,
+                borderTopColor: colors.border,
+                paddingBottom: (insets.bottom || 10) + keyboardPadding,
+                paddingTop: 10 + keyboardPadding/2,
+              },
+            ]}>
               <TextInput
                 value={message}
                 onChangeText={setMessage}
-                placeholder="Type a message..."
-                style={styles.input}
+                placeholder="Type your message..."
+                placeholderTextColor={isDark ? '#aaa' : '#666'}
+                style={[
+                  styles.input,
+                  {
+                    backgroundColor: colors.inputBackground,
+                    color: colors.text,
+                  },
+                ]}
                 multiline
               />
               <TouchableOpacity
@@ -154,11 +198,10 @@ export default function ChatScreen() {
                 style={styles.sendButton}
                 disabled={loading}
               >
-                {loading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.sendText}>Send</Text>
-                )}
+                {loading
+                  ? <ActivityIndicator color="#fff" />
+                  : <Text style={styles.sendText}>Send</Text>
+                }
               </TouchableOpacity>
             </View>
           </View>
@@ -169,7 +212,9 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#fff' },
+  safeArea: {
+    flex: 1,
+  },
   messagesList: {
     padding: 10,
     flexGrow: 1,
@@ -181,36 +226,21 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     maxWidth: '80%',
   },
-  userBubble: {
-    alignSelf: 'flex-end',
-    backgroundColor: '#DCF8C6',
-  },
-  botBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#E3E3E3',
-  },
-  messageText: {
-    fontSize: 16,
-  },
   typingIndicator: {
     paddingHorizontal: 16,
     paddingBottom: 4,
     fontStyle: 'italic',
-    color: '#888',
   },
   inputContainer: {
     flexDirection: 'row',
-    padding: 10,
-    backgroundColor: '#f9f9f9',
+    paddingHorizontal: 10,
     alignItems: 'flex-end',
     borderTopWidth: 1,
-    borderColor: '#ddd',
   },
   input: {
     flex: 1,
     padding: 10,
     borderRadius: 20,
-    backgroundColor: '#f1f1f1',
     marginRight: 10,
     maxHeight: 100,
   },
