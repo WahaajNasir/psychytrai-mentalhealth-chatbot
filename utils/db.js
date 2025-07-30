@@ -17,7 +17,7 @@ db.execAsync(`
   );
 `);
 
-export const insertMessage = async (id, text, sender) => {
+export const insertMessage = async ({ id, text, sender }) => {
   await db.runAsync('INSERT INTO messages (id, text, sender) VALUES (?, ?, ?)', [id, text, sender]);
 };
 
