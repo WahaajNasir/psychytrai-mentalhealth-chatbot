@@ -17,6 +17,23 @@ db.execAsync(`
   );
 `);
 
+db.execAsync(`
+  CREATE TABLE IF NOT EXISTS checkups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phqScore INTEGER,
+    gadScore INTEGER,
+    createdAt TEXT
+  );
+`);
+
+export const insertCheckupScores = async (phq, gad) => {
+  await db.runAsync(
+    'INSERT INTO checkups (phqScore, gadScore, createdAt) VALUES (?, ?, ?)',
+    [phq, gad, new Date().toISOString()]
+  );
+};
+
+
 export const insertMessage = async ({ id, text, sender }) => {
   await db.runAsync('INSERT INTO messages (id, text, sender) VALUES (?, ?, ?)', [id, text, sender]);
 };
