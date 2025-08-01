@@ -15,10 +15,7 @@ import {
   saveSummary,
 } from '../utils/db';
 import { useTheme } from '../context/ThemeContext';
-import { shouldTriggerCheckup, getQuestionnaire, scoreAnswerWithGemini, saveCheckupDate } from '../utils/Questionnaire';
-import { DAYS_TO_CHECKUP } from '@env';
-
-
+import { runQuestionnaireIfDue } from '../utils/Questionnaire';
 
 export default function ChatScreen({ navigation }) {
   const { isDark, toggleTheme } = useTheme();
@@ -30,11 +27,9 @@ export default function ChatScreen({ navigation }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState('');
-  const [isQuestionnaireMode, setIsQuestionnaireMode] = useState(false);
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [scores, setScores] = useState([]);
   const [keyboardPadding, setKeyboardPadding] = useState(0);
   const [userInfo, setUserInfo] = useState(null);
+  const userInputResolver = useRef(null);
 
   const colors = {
     background: isDark ? '#121212' : '#FFFFFF',
@@ -47,7 +42,7 @@ export default function ChatScreen({ navigation }) {
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener('keyboardDidShow', () => {
-      setKeyboardPadding(50); // Adjust this value to increase/decrease padding
+      setKeyboardPadding(50);
     });
     const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
       setKeyboardPadding(0);
@@ -59,39 +54,24 @@ export default function ChatScreen({ navigation }) {
     };
   }, []);
 
-useEffect(() => {
-  const init = async () => {
-    const userData = await AsyncStorage.getItem('userInfo');
-    const user = userData ? JSON.parse(userData) : null;
-    if (user) {
-      setUserInfo(user);
-    }
+  useEffect(() => {
+    const init = async () => {
+      const userData = await AsyncStorage.getItem('userInfo');
+      const user = userData ? JSON.parse(userData) : null;
+      if (user) setUserInfo(user);
 
-    const due = await shouldTriggerCheckup();
-    console.log('Checkup due?', due);
+      const ranCheckup = await runQuestionnaireIfDue(user, appendMessage, setLoading, waitForUserInput);
 
-    if (due) {
-      setMessages([
-        {
-          _id: Date.now().toString(),
-          text: "Let's have a quick mental health check-in. Just answer honestly.",
-          createdAt: new Date(),
-          user: { _id: 2, name: 'Bot' },
-        },
-      ]);
-      setIsQuestionnaireActive(true);
-      setCurrentQuestionIndex(0);
-      return;
-    }
+      if (!ranCheckup) {
+        const storedMessages = await getMessages();
+        setMessages(storedMessages || []);
+        const storedSummary = await getSummary();
+        setSummary(storedSummary || '');
+      }
+    };
 
-    // Only load messages if no checkup is due
-    await loadChatHistory();
-  };
-
-  init();
-}, []);
-
-
+    init();
+  }, []);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -111,98 +91,60 @@ useEffect(() => {
     });
   }, [navigation, toggleTheme, isDark]);
 
-
-const checkIfCheckupIsDue = async (user) => {
-  const due = await shouldTriggerCheckup();
-  console.log('Checkup due?', due);
-
-  if (due) {
-    const q = getQuestionnaire();
-    const opening = {
-      id: Date.now().toString(),
-      text: "Let's have a quick mental health check-in. Please answer honestly. This won't be shared with anyone.",
-      sender: 'bot',
+  const appendMessage = (msg) => {
+    const mapped = {
+      id: `${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
+      text: msg.text,
+      sender: msg.role === 'user' ? 'user' : 'bot',
     };
-    const firstQuestion = {
-      id: (Date.now() + 1).toString(),
-      text: q[0],
-      sender: 'bot',
-    };
-    setMessages((prev) => [...prev, opening, firstQuestion]);
-    setIsQuestionnaireMode(true);
-    setQuestionIndex(0);
-    setUserInfo(user); // just in case
-  }
-};
+    setMessages((prev) => [...prev, mapped]);
+  };
 
+  const waitForUserInput = () => {
+    return new Promise((resolve) => {
+      userInputResolver.current = resolve;
+    });
+  };
 
   const handleSend = async () => {
     if (!input.trim()) return;
-    const userMessage = { id: Date.now().toString(), text: input, sender: 'user' };
+    const userMessage = { id: `${Date.now()}-${Math.floor(Math.random() * 1000000)}`, text: input.trim(), sender: 'user' };
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
 
-    if (isQuestionnaireMode) {
-      const allQuestions = getQuestionnaire();
-      const currentQuestion = allQuestions[questionIndex];
-      const score = await scoreAnswerWithGemini(currentQuestion, userMessage.text, userInfo);
-      setScores((prev) => [...prev, score]);
+    if (userInputResolver.current) {
+      userInputResolver.current(userMessage);
+      userInputResolver.current = null;
+      return;
+    }
 
-      const nextIndex = questionIndex + 1;
-      if (nextIndex < allQuestions.length) {
-        const nextQuestion = {
-          id: (Date.now() + 1).toString(),
-          text: allQuestions[nextIndex],
-          sender: 'bot',
-        };
-        setMessages((prev) => [...prev, nextQuestion]);
-        setQuestionIndex(nextIndex);
-      } else {
-        // Done with questionnaire
-        const totalPHQ = scores.slice(0, 9).reduce((a, b) => a + b, 0);
-        const totalGAD = scores.slice(9).reduce((a, b) => a + b, 0);
-        const closingMessage = {
-          id: Date.now().toString(),
-          text: `Thank you for sharing. PHQ-9 Score: ${totalPHQ}, GAD-7 Score: ${totalGAD}. I'm here to help however I can.`,
-          sender: 'bot',
-        };
-        setMessages((prev) => [...prev, closingMessage]);
-        setIsQuestionnaireMode(false);
-        await saveCheckupDate();
-      }
-    } else {
-  setLoading(true);
-  try {
-    const aiResponse = await getGeminiResponse(summary, userMessage.text, userInfo);
-    const botMessage = { id: Date.now().toString(), text: aiResponse, sender: 'bot' };
+    setLoading(true);
+    try {
+      const aiResponse = await getGeminiResponse(summary, userMessage.text, userInfo);
+      const botMessage = { id: `${Date.now()}-${Math.floor(Math.random() * 1000000)}`, text: aiResponse, sender: 'bot' };
 
-    setMessages((prev) => {
-      const updated = [...prev, botMessage];
-      return updated;
-    });
+      setMessages((prev) => [...prev, botMessage]);
 
-    await insertMessage(userMessage);
-    await insertMessage(botMessage);
+      await insertMessage(userMessage);
+      await insertMessage(botMessage);
 
-    setSummary((prevSummary) => {
-      const updatedMessages = [...messages, userMessage, botMessage];
-      const trimmedSummary = updatedMessages
-        .slice(-10)
-        .map((m) => `${m.sender === 'user' ? 'User' : 'Bot'}: ${m.text}`)
-        .join('\n');
-      saveSummary(trimmedSummary);
-      return trimmedSummary;
-    });
-  } catch (error) {
-    console.error('AI response failed:', error);
-    setMessages((prev) => [
-      ...prev,
-      { id: Date.now().toString(), text: 'Sorry, something went wrong.', sender: 'bot' },
-    ]);
-  } finally {
-    setLoading(false);
-  }
-}
+      setSummary((prevSummary) => {
+        const updatedMessages = [...messages, userMessage, botMessage];
+        const trimmed = updatedMessages.slice(-10).map((m) =>
+          `${m.sender === 'user' ? 'User' : 'Bot'}: ${m.text}`
+        ).join('\n');
+        saveSummary(trimmed);
+        return trimmed;
+      });
+    } catch (error) {
+      console.error('AI response failed:', error);
+      setMessages((prev) => [
+        ...prev,
+        { id: `${Date.now()}-${Math.floor(Math.random() * 1000000)}`, text: 'Sorry, something went wrong.', sender: 'bot' },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const renderMessage = ({ item }) => (
@@ -235,9 +177,9 @@ const checkIfCheckupIsDue = async (user) => {
               renderItem={renderMessage}
               contentContainerStyle={[
                 styles.messagesList,
-                { 
-                  paddingBottom: (Platform.OS === 'ios' ? 80 : 70) + keyboardPadding 
-                }
+                {
+                  paddingBottom: (Platform.OS === 'ios' ? 80 : 70) + keyboardPadding,
+                },
               ]}
               onContentSizeChange={() =>
                 flatListRef.current?.scrollToEnd({ animated: true })
@@ -261,7 +203,7 @@ const checkIfCheckupIsDue = async (user) => {
                 backgroundColor: colors.background,
                 borderTopColor: colors.border,
                 paddingBottom: (insets.bottom || 10) + keyboardPadding,
-                paddingTop: 10 + keyboardPadding/2,
+                paddingTop: 10 + keyboardPadding / 2,
               },
             ]}>
               <TextInput

@@ -1,8 +1,8 @@
-// utils/questionnaire.js
 import * as SecureStore from 'expo-secure-store';
 import { getGeminiResponse } from './api';
 import { differenceInDays } from 'date-fns';
 import { DAYS_TO_CHECKUP } from '@env';
+import { insertCheckupScores } from './db';
 
 const PHQ9_QUESTIONS = [
   "In the past two weeks, how often have you felt little interest or pleasure in doing things?",
@@ -38,14 +38,19 @@ export async function shouldTriggerCheckup() {
   if (!lastCheckup) return true;
 
   const diff = differenceInDays(new Date(), new Date(lastCheckup));
-  console.log(diff>=daysLimit)
   return diff >= daysLimit;
 }
 
+/**
+ * Save the current timestamp as the last checkup date
+ */
 export async function saveCheckupDate() {
   await SecureStore.setItemAsync(STORAGE_KEY, new Date().toISOString());
 }
 
+/**
+ * Score an individual answer using Gemini API
+ */
 export async function scoreAnswerWithGemini(question, answer, userInfo) {
   const prompt = `Using PHQ-9 or GAD-7 scale, rate the user's response from 0 (not at all) to 3 (nearly every day). 
 Question: "${question}" 
@@ -57,31 +62,50 @@ Respond only with a number from 0 to 3.`;
   return Math.min(Math.max(numeric, 0), 3);
 }
 
+/**
+ * Run the questionnaire, ask questions, get answers, score, and store results
+ */
 export async function runQuestionnaireIfDue(userInfo, appendMessage, setLoading, waitForUserInput) {
   const shouldRun = await shouldTriggerCheckup();
   if (!shouldRun) return false;
 
   await saveCheckupDate();
 
-  appendMessage({ role: 'system', text: "Let's have a quick mental health check-in. Just answer honestly, and I'll take care of the rest." });
+  appendMessage({
+    role: 'system',
+    text: "Let's have a quick mental health check-in. Just answer honestly, and I'll take care of the rest."
+  });
 
   const questions = [...PHQ9_QUESTIONS, ...GAD7_QUESTIONS];
-  let totalScore = 0;
+  const scores = [];
 
-  for (let question of questions) {
+  for (let i = 0; i < questions.length; i++) {
+    const question = questions[i];
     appendMessage({ role: 'bot', text: question });
 
-    const userReply = await waitForUserInput(); // Wait for user to respond
+    const userReply = await waitForUserInput(); // Waits for user response
     const score = await scoreAnswerWithGemini(question, userReply.text, userInfo);
+    scores.push(score);
 
-    totalScore += score;
     appendMessage({ role: 'system', text: `Thanks for sharing. [Score: ${score}/3]` });
   }
 
+  // Split scores
+  const phqScore = scores.slice(0, 9).reduce((a, b) => a + b, 0);
+  const gadScore = scores.slice(9).reduce((a, b) => a + b, 0);
+
+  // Log scores to console
+  console.log('✅ PHQ-9 Score:', phqScore);
+  console.log('✅ GAD-7 Score:', gadScore);
+
+  // Save scores to SQLite
+  await insertCheckupScores(phqScore, gadScore);
+
+  // Final response
   appendMessage({
     role: 'system',
-    text: `Thank you for completing the check-in. Your overall score is ${totalScore}. If you're feeling overwhelmed, consider reaching out to a professional or helpline.`,
+    text: `Thank you for completing the check-in. PHQ-9 Score: ${phqScore}, GAD-7 Score: ${gadScore}. If you're feeling overwhelmed, please consider reaching out to a professional or helpline.`,
   });
 
-  return true; // Questionnaire was run
+  return true; // Check-in was run
 }
